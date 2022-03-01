@@ -1,0 +1,434 @@
+---
+title: "CherryBlossomAnalysis"
+author: "Douglas"
+date: "2/27/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Input relevant libraries:
+
+```{r, echo = FALSE }
+library( tidyverse );
+library( glmnet );
+library( rnoaa );
+
+```
+
+Input the Cherry Data (Taken from demo_analysis.Rmd)
+
+## Loading the data
+
+The data for each of the three main sites is provided as simple text file in CSV format.
+Each file contains the dates of the peak bloom of the cherry trees at the respective site, alongside the geographical location of the site.
+
+The six columns in each data file are
+
+* _location_ a human-readable location identifier (`string`).
+* _lat_ (approximate) latitude of the cherry trees (`double`).
+* _long_ (approximate) longitude of the cherry trees (`double`).
+* _alt_ (approximate) altitude of the cherry trees (`double`).
+* _year_ year of the observation (`integer`).
+* *bloom_date* date of peak bloom of the cherry trees (ISO 8601 date `string`). The "peak bloom date" may be defined differently for different sites
+* *bloom_doy* days since January 1st of the year until peak bloom (`integer`). January 1st corresponds to `1`.
+
+In R, the data files can be read with `read.csv()` and concatenated with the `bind_rows()` function:
+
+```{r, echo = FALSE}
+cherry <- read.csv("data/washingtondc.csv") %>% 
+  bind_rows(read.csv("data/liestal.csv")) %>% 
+  bind_rows(read.csv("data/kyoto.csv"))
+  
+```
+## Visualizing the time series (from demo_analysis.Rmd)
+
+
+```{r, fig.width=8, fig.height=3, out.width='100%', fig.cap="Time series of peak bloom of cherry trees since 1880 at three different sites."}
+cherry %>% 
+  filter(year >= 1880) %>%
+  ggplot(aes(x = year, y = bloom_doy)) +
+  geom_point() +
+  geom_step(linetype = 'dotted', color = 'gray50') +
+  scale_x_continuous(breaks = seq(1880, 2020, by = 20)) +
+  facet_grid(cols = vars(str_to_title(location))) +
+  labs(x = "Year", y = "Peak bloom (days since Jan 1st)")
+```
+##Load the temperature data from nearby locations( from demo_analysis.Rmd)
+
+The list of stations can be retrieved using the `ghcnd_stations()` function. Note that the closest weather station to each city with continuously collected maximum temperatures are USC00186350 (Washington D.C.), GME00127786 (Liestal), JA000047759 (Kyoto), and CA001108395 (Vancouver).
+
+As a simple demonstration, we retrieve the average seasonal maximum daily temperature (in 1/10 °C) from these stations using our own `get_temperature()` function, which wraps the `ghcnd_search()` function in the `rnoaa` package. (N.b. `ghcnd_search()` returns a list. Each element of the list corresponds to an element of the `var` argument.)
+
+```{r}
+#' Get the annual average maximum temperature at the given station,
+#' separated into the 4 meteorological seasons (Winter, Spring, Summer, Fall).
+#' 
+#' The seasons are span 3 months each.
+#' Winter is from December to February, Spring from March to May,
+#' Summer from June to August, and Fall from September to November.
+#' Note that December is counted towards the Winter of the next year, i.e.,
+#' temperatures in December 2020 are accounted for in Winter 2021.
+#' 
+#' @param stationid the `rnoaa` station id (see [ghcnd_stations()])
+#' @return a data frame with columns
+#'   - `year` ... the year of the observations
+#'   - `season` ... the season (Winter, Spring, Summer, Fall)
+#'   - `tmax_avg` ... average maximum temperate in tenth degree Celsius
+get_seasonal_temp <- function (stationid) {
+  ghcnd_search(stationid = stationid, var = c("tmax"), 
+               date_min = "1954-03-01", date_max = "2022-02-28")[[1]] %>%
+  mutate(year = as.integer(format(date, "%Y")),
+         month = as.integer(strftime(date, '%m')) %% 12, # make December "0"
+         season = cut(month, breaks = c(0, 2, 5, 8, 11),
+                      include.lowest = TRUE,
+                      labels = c("Winter", "Spring", "Summer", "Fall")),
+         year = if_else(month == 0, year + 1L, year)) %>%
+  group_by(year, season) %>%
+  summarize(tmax_avg = mean(tmax, na.rm = TRUE))
+}
+
+hist_seasonal_temp <-
+  tibble(location = "washingtondc", get_seasonal_temp("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_seasonal_temp("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_seasonal_temp("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_seasonal_temp("CA001108395")))
+
+hist_seasonal_temp %>%
+  ggplot() + 
+  aes(year, tmax_avg) + 
+  geom_line() +
+  xlim(1950, 2031) +
+  labs(x = "Year", y = "Average maximum temperature (1/10 °C)") +
+  facet_grid(factor(season) ~ str_to_title(location))
+```
+```{r}
+#' Get the monthly average maximum temperature at the given station,
+#' 
+#' 
+#' @param stationid the `rnoaa` station id (see [ghcnd_stations()])
+#' @return a data frame with columns
+#'   - `year` ... the year of the observations
+#'   - `season` ... the season (Winter, Spring, Summer, Fall)
+#'   - `tmax_avg` ... average maximum temperate in tenth degree Celsius
+get_monthly_temp <- function (stationid) {
+  ghcnd_search(stationid = stationid, var = c("tmax"), 
+               date_min = "1955-01-01", date_max = "2022-02-28")[[1]] %>%
+  mutate(year = as.integer(format(date, "%Y")),
+         month = as.integer(strftime(date, '%m'))) %>%
+  group_by(year, month) %>%
+  summarize(tmax_avg = mean(tmax, na.rm = TRUE))
+}
+
+hist_monthly_temp <-
+  tibble(location = "washingtondc", get_monthly_temp("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_monthly_temp("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_monthly_temp("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_monthly_temp("CA001108395")))
+
+hist_monthly_temp %>%
+  ggplot() + 
+  aes(year, tmax_avg) + 
+  geom_line() +
+  xlim(1950, 2031) +
+  labs(x = "Year", y = "Average maximum temperature (1/10 °C)") +
+  facet_grid(factor(month) ~ str_to_title(location))
+```
+```{r}
+#' Get the weekly average maximum temperature at the given station,
+#' Only data between janauary 1 and March 31 will be considered, based on phenological understanding and lack of chilling requirement consideration.
+#' 
+#' @param stationid the `rnoaa` station id (see [ghcnd_stations()])
+#' @return a data frame with columns
+#'   - `year` ... the year of the observations
+#'   - `season` ... the season (Winter, Spring, Summer, Fall)
+#'   - `tmax_avg` ... average maximum temperate in tenth degree Celsius
+get_weekly_temp <- function (stationid) {
+  ghcnd_search(stationid = stationid, var = c("tmax"), 
+               date_min = "1955-01-01", date_max = "2022-02-28")[[1]] %>%
+  mutate(year = as.integer(format(date, "%Y")),
+         month = as.integer(strftime(date, '%m')),
+         day = as.integer( strftime(date, '%d')),# make December "0"
+         week = cut(day, breaks = c(1, 8, 15, 22, 32 ),
+                      include.lowest = TRUE,
+                      labels = c("Week1", "Week2", "Week3", "Week4"))) %>%
+  group_by(year, month, week) %>%
+  summarize(tmax_avg = mean(tmax, na.rm = TRUE))
+}
+
+hist_weekly_temp <-
+  tibble(location = "washingtondc", get_weekly_temp("USC00186350")) %>%
+  bind_rows(tibble(location = "liestal", get_weekly_temp("GME00127786"))) %>%
+  bind_rows(tibble(location = "kyoto", get_weekly_temp("JA000047759"))) %>%
+  bind_rows(tibble(location = "vancouver", get_weekly_temp("CA001108395")))
+
+week4.ind = which( hist_weekly_temp$week == 'Week4' );
+hist_weekly_temp[week4.ind,] %>%
+  ggplot() + 
+  aes(year, tmax_avg) + 
+  geom_line() +
+  xlim(1950, 2031) +
+  labs(x = "Year", y = "Average maximum temperature (1/10 °C)") +
+  facet_grid(factor(month) ~ str_to_title(location))
+```
+Climate Modes are large scale patterns of variability that often exhibit significant influence over weather conditions in many locations.  Anomalies of climate modes, represented using the indices, accessed via https://psl.noaa.gov/data/climateindices/list/ are often associated with above or below average temperature and precipitation.
+
+Climate modes will be considered on a seasonal basis using the same monthly-season distinctions as temperature.
+
+```{r, echo = FALSE }
+##These .txt files do not contain the same format as the earlier .csv files
+##Data spans 1948-2022, although missing data is somewhat prevalent at the beginning and end.  
+
+climate_mode_process <- function( mode.data, mode.name ){
+  years = as.matrix( mode.data[,1] );
+  num.years = length( years );
+  mode.data = t( as.matrix( mode.data[,-1] ) ); ##R converts matrices to vectors column wise, whereas the date progress in the original file row wise
+  mode.data = as.vector( mode.data );
+  missing = which( mode.data < -9.90 );
+  mode.data[missing] = NA;
+  if( years[1] == 1948 ){
+    rmv.ind = c( 1:74, (12*num.years - 9):(12 * num.years) );
+    mode.data = mode.data[-rmv.ind];
+    ##Add a prior month to complete the 1948 winter season
+  } else { stop('Error in climate_mode_progress: Wrong Start Year');}
+  dim( mode.data ) = c( 3, ( ( num.years - 7 ) * 4 ) );
+  mode.data = colMeans( mode.data, na.rm = TRUE ); ##Data is now seasonal means beginning with Spr 1948
+  ##Add a missing data point for 1948 winter
+  dim( mode.data ) = c( 4, ( num.years - 7 ) );
+  mode.data = t( mode.data );
+  years = years[-(1:6)];
+  years = years[-length(years)];
+  ##mode.data is now the seasonal means of the climate mode, organized as Winter, Spring, Summer, Fall under the year assignment used for seasonal temperature
+
+  mode.data = data.frame( cbind( years, mode.data ) );
+  colnames( mode.data ) = c( 'Years', paste( mode.name, 'Spr', sep='' ), paste( mode.name, 'Sum', sep = '' ), paste( mode.name, 'Fall', sep = '' ), paste( mode.name, 'Win', sep = '' ) );
+  
+  return( mode.data );
+  
+}
+nina = read.table( 'data/nina34.txt' );
+pdo = read.table( 'data/pdo.txt' );
+tna = read.table( 'data/tna.txt' );
+nao = read.table( 'data/nao.txt' );
+pna = read.table( 'data/pna.txt' );
+
+climate.indices = climate_mode_process( read.table( 'data/nina34.txt' ), 'Nina' );
+climate.indices = cbind( climate.indices, climate_mode_process( read.table( 'data/pdo.txt' ), 'pdo' )[,-1] );
+climate.indices = cbind( climate.indices, climate_mode_process( read.table( 'data/tna.txt' ), 'tna' )[,-1] );
+climate.indices = cbind( climate.indices, climate_mode_process( read.table( 'data/nao.txt' ), 'nao' )[,-1] );
+climate.indices = cbind( climate.indices, climate_mode_process( read.table( 'data/pna.txt' ), 'pna' )[,-1] );
+
+
+```
+
+
+Aggregate the data necessary to train the regression model for each location.
+Target: 1955-2021 Cherry Blossom dates at 3 locations (will vary with lead time)
+Predictors: Climate Modes including same year Winter, and previous year other seasons.  Seasonal temperature including same year winter and previous year other seasons. Seasonal temperature and climate modes are likely highly collinear (location dependent). Monthly observed temperatures including only same year January and February.  'Weekly' temperatures including only same year January and February. (Additional experiments could be conducted including March monthly and weekly data to check sensitivity to the inclusion of this data. ) Projected Monthly (including March) and Winter season temperature determined using a linear fit to the data over the study period (added afterward)
+```{r}
+aggregate_data <- function( loc.data, loc.name ){
+ ##Assuming that loc.data is the climate.indices, add named columns with all other predictors 
+  
+  cherry.target.years = 1955:2021;
+  ##Add cherry data from target years
+  loc.cherry.ind = which( cherry$location == loc.name );
+  loc.cherry.ind = loc.cherry.ind[(length(loc.cherry.ind) - 66):length(loc.cherry.ind)];
+  if( length( setdiff( cherry.target.years, cherry$year[loc.cherry.ind] ) ) > 0 ) stop( 'Missing Cherry Blossom Data' );
+  cherry.data = c( cherry$bloom_doy[loc.cherry.ind], NA ); ##Add a missing value corresponding to 2022
+
+  target.years = 1955:2022; #shifted for seasons in preceding year
+  seasons = c( 'Winter', 'Spring', 'Summer', 'Fall' );
+  seasonal.data = NULL;
+  seasonal.fit.data = NULL;
+  ##The temperature data should 
+  for( i in 1:4 ){
+    loc.season.ind = which( hist_seasonal_temp$location == loc.name & hist_seasonal_temp$season == seasons[i] );
+    ##The years for winter data are different than the rest of the seasons.
+    if( seasons[i] == 'Winter' ){
+      sea.data = missing_years( target.years, hist_seasonal_temp$year[loc.season.ind], hist_seasonal_temp$tmax_avg[loc.season.ind] );
+      sea.fit = lm( sea.data ~ target.years )$fitted.values;
+      #missing.years = setdiff( (target.years + 1), hist_seasonal_temp$year[loc.season.ind] );
+    } else {
+      sea.data = missing_years( ( target.years - 1 ), hist_seasonal_temp$year[loc.season.ind], hist_seasonal_temp$tmax_avg[loc.season.ind] );
+      sea.fit = lm( sea.data ~ (target.years - 1) )$fitted.values;
+      #missing.years = setdiff( target.years, hist_seasonal_temp$year[loc.season.ind] );
+    }
+    seasonal.data = cbind( seasonal.data, sea.data );
+    seasonal.fit.data = cbind( seasonal.fit.data, sea.fit );
+    #print( paste( seasons[i], missing.years ) );
+  }  
+
+  ##Generate a linear fit to the seasonal data (representing projections of temperature into the future)  This may be important as observed quantities become less important.
+  
+  months = 1:3;
+  monthly.data = NULL;
+  monthly.fit.data = NULL;
+  for( i in months ){
+    loc.month.ind = which( hist_monthly_temp$location == loc.name & hist_monthly_temp$month == months[i] );
+    mon.data = missing_years( target.years, hist_monthly_temp$year[loc.month.ind], hist_monthly_temp$tmax_avg[loc.month.ind] );
+    mon.fit = lm( mon.data ~ target.years )$fitted.values;
+    if( i < 3 ){
+      monthly.data = cbind( monthly.data, mon.data );
+    }
+    monthly.fit.data = cbind( monthly.fit.data, mon.fit );
+  }
+  
+  months = 1; #Only consider Janaury, as February has missing data, causing problems with glmnet and prediction for 2022.
+  weeks = c( 'Week1', 'Week2', 'Week3', 'Week4' )
+  weekly.data = NULL;
+  for( m in months ){
+    for( w in 1:length(weeks) ){
+      loc.week.ind = which( hist_weekly_temp$location == loc.name & hist_weekly_temp$month == months[m] & hist_weekly_temp$week == weeks[w] );
+      wee.data = missing_years( target.years, hist_weekly_temp$year[loc.week.ind], hist_weekly_temp$tmax_avg[loc.week.ind] );
+      weekly.data = cbind( weekly.data, wee.data );
+    }
+  }
+
+    new.data = cbind( seasonal.data, monthly.data, weekly.data, cherry.data, seasonal.fit.data, monthly.fit.data );
+    new.data = data.frame( new.data );
+    colnames( new.data ) = c( seasons, 'Jan', 'Feb', paste( 'Jan', weeks, sep = '' ), 'bloom_doy', paste( 'Fit', seasons, sep = '' ), paste( 'Fit', c( 'Jan', 'Feb', 'Mar' ), sep = '' ) );
+    
+  return( cbind( loc.data, new.data ) );
+  
+}
+
+missing_years <- function( tar.years, data.years, data ){
+  
+  ##Add NA in the appropriate place for the missing years of data.
+  missing.years = setdiff( tar.years, data.years );
+  avg.val = mean( data, na.action = 'na.omit' );
+  ##Assumption is made that missing data will be found in numerical order.
+  if( length( missing.years ) > 0 ){
+   for( i in 1:length( missing.years) ){
+     tar.ind = which( tar.years == missing.years[i] );
+     data = c( data[1:(tar.ind-1)], avg.val, data[-(1:(tar.ind-1))] );
+   }
+  } 
+  if( length( tar.years) != length( data ) ) print('Error in missing_years function, lengths are not same');
+
+  return( data );
+}
+
+print( 'Wash DC' );
+wash.data = climate.indices;
+wash.data = aggregate_data( wash.data, 'washingtondc' );
+wash.data = data.frame( wash.data );
+
+print( 'Kyoto' )
+kyoto.data = climate.indices;
+kyoto.data = aggregate_data( kyoto.data, 'kyoto' );
+kyoto.data = data.frame( kyoto.data );
+
+print( 'liestal' );
+liestal.data = climate.indices;
+liestal.data = aggregate_data( liestal.data, 'liestal' );
+liestal.data = data.frame( liestal.data );
+
+last.year.ind = dim( wash.data)[1];
+
+combined.data = rbind( wash.data[-last.year.ind,], kyoto.data[-last.year.ind,], liestal.data[-last.year.ind,] );
+```
+
+Train models to predict bloom dates for each location and for the aggregation of locations.  Glmnet() includes cross validation that provides some guidance about overfitting and skill on independent data.  For each lead time, adjust the predictors and target and generate a prediction for that lead from today, adding this to the final set of predictions.  The target predictions correspond to lead times of 0-9.
+```{r, echo = FALSE }
+
+regress_model <- function( target, lag.predictor, fit.predictor, lead ){
+  
+  if( lead > 0 ){
+    target.omit = 1:lead;
+    predict.omit = ( length( target ) - lead + 1):(length(target));
+    reg.mod = lm( target[-target.omit] ~ cbind( lag.predictor[-predict.omit,], fit.predictor[-target.omit,] ) );
+  } else {
+    reg.mod = lm( target ~ cbind( lag.predictor, fit.predictor ) );
+  }
+ 
+  return( reg.mod ); 
+}
+
+lasso_model <- function( target, lag.predictor, fit.predictor, lead, fold ){
+  
+  if( lead > 0 ){
+    target.omit = 1:lead;
+    predict.omit = ( length( target ) - lead + 1):(length(target));
+    las.mod = cv.glmnet( y = target[-target.omit], x = cbind( lag.predictor[-predict.omit,], fit.predictor[-target.omit,] ), foldid = fold[-target.omit] );
+  } else {
+    las.mod = cv.glmnet( y = target, x = cbind( lag.predictor, fit.predictor ), foldid = fold );
+  }
+ 
+  return( las.mod ); 
+}
+
+##The names and dimensions of each site are consistent
+cherry.ind = which( names( wash.data ) == 'bloom_doy' );
+year.ind = which( names( wash.data ) == 'Years' );
+lag.predictors = (year.ind+1):(cherry.ind-1);
+fit.predictors = (cherry.ind+1):dim(wash.data)[2];
+
+last.year.ind = dim( wash.data )[1];
+##Specify the cross validation, otherwise the random samples result in slightly different lasso results each time.
+foldid = rep( 1:6, 12 );
+foldid = foldid[1:(last.year.ind-1)];
+
+lead.val = 0:9;
+wash.pred.bloom = NULL;
+kyoto.pred.bloom = NULL;
+liestal.pred.bloom = NULL;
+for( ld in lead.val ){
+
+  wash.regress.mod = regress_model( wash.data[-last.year.ind,cherry.ind], as.matrix( wash.data[-last.year.ind,lag.predictors]), as.matrix( wash.data[-last.year.ind,fit.predictors] ), ld );
+  kyoto.regress.mod = regress_model( kyoto.data[-last.year.ind,cherry.ind], as.matrix( kyoto.data[-last.year.ind,lag.predictors]), as.matrix( kyoto.data[-last.year.ind,fit.predictors] ), ld );
+  liestal.regress.mod = regress_model( liestal.data[-last.year.ind,cherry.ind], as.matrix( liestal.data[-last.year.ind,lag.predictors]), as.matrix( liestal.data[-last.year.ind,fit.predictors] ), ld );
+
+  wash.lasso.mod = lasso_model( wash.data[-last.year.ind,cherry.ind], as.matrix( wash.data[-last.year.ind,lag.predictors]), as.matrix( wash.data[-last.year.ind,fit.predictors]), ld, foldid );
+  kyoto.lasso.mod = lasso_model( kyoto.data[-last.year.ind,cherry.ind], as.matrix( kyoto.data[-last.year.ind,lag.predictors]), as.matrix( kyoto.data[-last.year.ind,fit.predictors]), ld, foldid );
+  liestal.lasso.mod = lasso_model( liestal.data[-last.year.ind,cherry.ind], as.matrix( liestal.data[-last.year.ind,lag.predictors]), as.matrix( liestal.data[-last.year.ind,fit.predictors]), ld, foldid );
+  
+  
+  
+
+  ##Generate a prediction corresponding to the lead time.  Use last.year.ind for observed variables, and project the linear temperature data into the future.
+  if( ld == 0 ){
+    
+    wash.pred = as.numeric( c( 1, wash.data[last.year.ind,lag.predictors], wash.data[last.year.ind,fit.predictors] ) ) %*% coef( wash.lasso.mod, s = wash.lasso.mod$lambda.min );
+    kyoto.pred = as.numeric( c( 1, kyoto.data[last.year.ind,lag.predictors], kyoto.data[last.year.ind,fit.predictors] ) ) %*% coef( kyoto.lasso.mod, s = kyoto.lasso.mod$lambda.min );
+    liestal.pred = as.numeric( c( 1, liestal.data[last.year.ind,lag.predictors], liestal.data[last.year.ind,fit.predictors] ) ) %*% coef( liestal.lasso.mod, s = liestal.lasso.mod$lambda.min );
+    
+  }  else {
+    ##Generate predictions of the linear temperature fits.
+    was.fit.pred = NULL;
+    for( i in fit.predictors ){
+     was.fit.reg = lm( wash.data[,i] ~ wash.data[,year.ind] ); 
+     was.fit.pred = c( was.fit.pred, ( summary( was.fit.reg )$coef[1,1] + summary( was.fit.reg )$coef[2,1] * ( wash.data[last.year.ind,year.ind] + ld ) ) );
+    }
+    wash.pred = as.numeric( c( 1, wash.data[last.year.ind,lag.predictors], was.fit.pred ) ) %*% coef( wash.lasso.mod, s = wash.lasso.mod$lambda.min );
+  
+  
+   kyo.fit.pred = NULL;
+    for( i in fit.predictors ){
+     kyo.fit.reg = lm( kyoto.data[,i] ~ kyoto.data[,year.ind] ); 
+     kyo.fit.pred = c( kyo.fit.pred, ( summary( kyo.fit.reg )$coef[1,1] + summary( kyo.fit.reg )$coef[2,1] * ( kyoto.data[last.year.ind,year.ind] + ld ) ) );
+    }
+    kyoto.pred = as.numeric( c( 1, kyoto.data[last.year.ind,lag.predictors], kyo.fit.pred ) ) %*% coef( kyoto.lasso.mod, s = kyoto.lasso.mod$lambda.min );
+    
+    lie.fit.pred = NULL;
+    for( i in fit.predictors ){
+     lie.fit.reg = lm( liestal.data[,i] ~ liestal.data[,year.ind] ); 
+     lie.fit.pred = c( lie.fit.pred, ( summary( lie.fit.reg )$coef[1,1] + summary( lie.fit.reg )$coef[2,1] * ( liestal.data[last.year.ind,year.ind] + ld ) ) );
+    }
+    liestal.pred = as.numeric( c( 1, liestal.data[last.year.ind,lag.predictors], lie.fit.pred ) ) %*% coef( liestal.lasso.mod, s = liestal.lasso.mod$lambda.min );
+  }
+  wash.pred.bloom = c( wash.pred.bloom, round( as.numeric( wash.pred, digits = 0 ) ) );
+  kyoto.pred.bloom = c( kyoto.pred.bloom, round( as.numeric( kyoto.pred, digits = 0 ) ) );
+  liestal.pred.bloom = c( liestal.pred.bloom, round( as.numeric( liestal.pred, digits = 0 ) ) );
+}  
+vancouver.pred.bloom = round( colMeans( rbind( wash.pred.bloom, kyoto.pred.bloom, liestal.pred.bloom ) ), digits = 0 );
+
+output.data = cbind( 2022:2031, kyoto.pred.bloom, liestal.pred.bloom, wash.pred.bloom, vancouver.pred.bloom );
+#output.data = data.frame( output.data )
+colnames(output.data) = c( "year", "kyoto", "liestal", "washingtondc", "vancouver" );
+
+write.csv( output.data, file = 'NedzaCherryBlossom2021.csv', row.names = FALSE );
+```
+
